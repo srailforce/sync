@@ -17,8 +17,46 @@ import (
 
 func GenFolderName() string {
 	time := time.Now().Format("20060102150405")
+	return "SYNC_" + time
+}
 
-	return "SYNC_" + time + "_"
+type Sync struct {
+	tempDir     string
+	cloneFolder string
+	archiveName string
+	pattern     *regexp.Regexp
+}
+
+func NewSync(pattern *regexp.Regexp) Sync {
+	name := GenFolderName()
+
+	tempDir, err := os.MkdirTemp("", "")
+	checkError(err)
+
+	cloneFolder := filepath.Join(tempDir, name)
+	err = os.Mkdir(cloneFolder, fs.ModeDir)
+	checkError(err)
+
+	return Sync{
+		tempDir:     tempDir,
+		cloneFolder: cloneFolder,
+		archiveName: name,
+		pattern:     pattern,
+	}
+}
+
+func (state *Sync) FindRepo(ch chan<- string) {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go state.findRepo(".", ch, &wg)
+	wg.Wait()
+	close(ch)
+}
+
+func checkError(err error) {
+	if err != nil {
+		log.Fatal(err)
+	}
 }
 
 type Walk struct {
@@ -31,8 +69,10 @@ func NewWalk(path string, pattern regexp.Regexp) Walk {
 	return Walk{wg: sync.WaitGroup{}, path: path, re: pattern}
 }
 
-func WalkDir(dirFs string, pattern regexp.Regexp, emitter chan<- string, wg *sync.WaitGroup) {
-	dirs, err := fs.ReadDir(os.DirFS(dirFs), ".")
+func (sync *Sync) findRepo(path string, ch chan<- string, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	dirs, err := os.ReadDir(path)
 	if err != nil {
 		log.Panicln("error reading dir:", err)
 	}
@@ -40,77 +80,41 @@ func WalkDir(dirFs string, pattern regexp.Regexp, emitter chan<- string, wg *syn
 		if !dir.IsDir() {
 			continue
 		}
-		path := filepath.Join(dirFs, dir.Name())
-		if pattern.MatchString(dir.Name()) && IsGitRepo(path) {
-			log.Println("send ", path)
-			emitter <- path
+		subpath := filepath.Join(path, dir.Name())
+		if sync.pattern.MatchString(dir.Name()) && isGitRepo(subpath) {
+			ch <- subpath
 		} else {
 			wg.Add(1)
-			WalkDir(path, pattern, emitter, wg)
+			sync.findRepo(subpath, ch, wg)
 		}
 	}
-	defer wg.Done()
 }
 
-func (walk *Walk) WalkDir(ch chan<- string) {
-	walk.wg.Add(1)
-	go WalkDir(walk.path, walk.re, ch, &walk.wg)
-	walk.wg.Wait()
-	close(ch)
-}
-
-func IsGitRepo(path string) bool {
+func isGitRepo(path string) bool {
 	_, err := git.PlainOpen(path)
 	return err == nil
 }
 
 func main() {
 	if len(os.Args) < 2 {
-		log.Println("usage:", os.Args[0], " <Regex>")
+		log.Println("usage:", filepath.Base(os.Args[0]), " <Regex>")
 		os.Exit(-1)
 	}
 	pattern, err := regexp.Compile(os.Args[1])
 	if err != nil {
 		panic(err)
 	}
+	sync := NewSync(pattern)
 
-	folderName := GenFolderName()
-	tempDir, err := os.MkdirTemp("", folderName)
-	dirName := filepath.Base(tempDir)
-	cloneDir := filepath.Join(tempDir, dirName)
-	if err := os.Mkdir(cloneDir, os.ModeDir); err != nil {
-		log.Fatal("error creating temp dir", err)
-		panic(err)
-	}
-
-	if err != nil {
-		log.Println("error creating temp dir:", err)
-		return
-	}
-
-	log.Println("Clone into ", tempDir)
 	repos := make(chan string, 100)
-	wd, err := os.Getwd()
-	if err != nil {
-		panic(err)
-	}
-	log.Println("current dir", wd)
-	var cloneWg sync.WaitGroup
-	w := NewWalk(wd, *pattern)
-	go w.WalkDir(repos)
-	cloneWg.Add(1)
-	go Clone(cloneDir, repos, &cloneWg)
-	cloneWg.Wait()
-	w.wg.Wait()
-	// close(repos)
-	log.Println("end wait")
-	CreateZipArchive(tempDir, dirName)
+	go sync.FindRepo(repos)
+	sync.Clone(repos)
+	sync.CreateZipArchive()
 }
 
-func CreateZipArchive(tempDir, folerName string) {
-	rootFolder := os.TempDir()
-	fileName := filepath.Join(rootFolder, folerName+".zip")
-	zipFile, err := os.OpenFile(fileName, os.O_CREATE, fs.ModeCharDevice)
+func (sync *Sync) CreateZipArchive() {
+	zipFilePath := filepath.Join(os.TempDir(), sync.archiveName+".zip")
+	zipFile, err := os.OpenFile(zipFilePath, os.O_CREATE, fs.ModeCharDevice)
 	if err != nil {
 		log.Panicln("error opening zip file:", err)
 		panic("failed to create zip file")
@@ -118,40 +122,53 @@ func CreateZipArchive(tempDir, folerName string) {
 	defer zipFile.Close()
 	writer := zip.NewWriter(zipFile)
 	defer writer.Close()
-	writer.AddFS(os.DirFS(tempDir))
-	fmt.Println(fileName)
+	writer.AddFS(os.DirFS(sync.tempDir))
+	fmt.Println(zipFilePath)
 }
 
-func Clone(tempDir string, repos chan string, wg *sync.WaitGroup) {
-	for {
-		if repo, ok := <-repos; ok {
-			log.Println("clone", repo)
-			r, err := git.PlainOpen(repo)
-			if err != nil {
-				log.Println(err)
-				return
-			}
-			head, err := r.Head()
-			if err != nil {
-				log.Println("Error getting worktree:", repo, err)
-				return
-			}
-			dirName := filepath.Base(repo)
+func (sync *Sync) Clone(repos <-chan string) {
+	for repo := range repos {
+		log.Println("clone", repo)
+		r, err := git.PlainOpen(repo)
+		if err != nil {
+			log.Fatalln(err)
+		}
+		head, err := r.Head()
+		if err != nil {
+			log.Fatalln("Error getting worktree:", repo, err)
+		}
+		dirName := filepath.Base(repo)
 
-			_, err = git.PlainClone(filepath.Join(tempDir, dirName), false, &git.CloneOptions{
-				URL:           repo,
-				SingleBranch:  true,
-				ReferenceName: head.Name(),
-				Progress:      io.Discard,
-			})
+		newRepoPath := filepath.Join(sync.cloneFolder, dirName)
+		newRepo, err := git.PlainClone(newRepoPath, false, &git.CloneOptions{
+			URL:           repo,
+			SingleBranch:  true,
+			ReferenceName: head.Name(),
+			Progress:      io.Discard,
+		})
 
-			if err != nil {
-				log.Println("error cloning repo: ", repo)
+		if err != nil {
+			log.Fatalln("error cloning repo: ", repo)
+		}
+
+		remotes, err := newRepo.Remotes()
+		if err != nil {
+			log.Fatalln(err)
+		}
+		for _, remote := range remotes {
+			if err := newRepo.DeleteRemote(remote.String()); err != nil {
+				log.Println("Failed to delete remote", remote)
 			}
-		} else {
-			log.Println("end clone")
-			break
+		}
+
+		remotes, err = r.Remotes()
+		if err != nil {
+			log.Fatalln(err)
+		}
+		for _, remote := range remotes {
+			if _, err := newRepo.CreateRemote(remote.Config()); err != nil {
+				log.Fatalln(err)
+			}
 		}
 	}
-	defer wg.Done()
 }
