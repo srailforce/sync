@@ -1,4 +1,4 @@
-module github.com/sy1r94/sync
+module github.com/syvoidbuild/sync
 
 go 1.23
 
