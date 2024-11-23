@@ -3,7 +3,6 @@ package main
 import (
 	"archive/zip"
 	"fmt"
-	"io"
 	"io/fs"
 	"log"
 	"os"
@@ -140,11 +139,12 @@ func (sync *Sync) Clone(repos <-chan string) {
 		dirName := filepath.Base(repo)
 
 		newRepoPath := filepath.Join(sync.cloneFolder, dirName)
+		log.Println(newRepoPath, repo, head.Name())
 		newRepo, err := git.PlainClone(newRepoPath, false, &git.CloneOptions{
 			URL:           repo,
 			SingleBranch:  true,
 			ReferenceName: head.Name(),
-			Progress:      io.Discard,
+			Progress:      os.Stderr,
 		})
 
 		if err != nil {
@@ -156,7 +156,7 @@ func (sync *Sync) Clone(repos <-chan string) {
 			log.Fatalln(err)
 		}
 		for _, remote := range remotes {
-			if err := newRepo.DeleteRemote(remote.String()); err != nil {
+			if err := newRepo.DeleteRemote(remote.Config().Name); err != nil {
 				log.Println("Failed to delete remote", remote)
 			}
 		}
