@@ -1,4 +1,4 @@
-module github.com/utils/sync
+module github.com/sy1r94/sync
 
 go 1.23
 
