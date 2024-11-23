@@ -24,9 +24,10 @@ type Sync struct {
 	cloneFolder string
 	archiveName string
 	pattern     *regexp.Regexp
+	extraFiles  []string
 }
 
-func NewSync(pattern *regexp.Regexp) Sync {
+func NewSync(pattern *regexp.Regexp, extraFiles []string) Sync {
 	name := GenFolderName()
 
 	tempDir, err := os.MkdirTemp("", "")
@@ -41,6 +42,7 @@ func NewSync(pattern *regexp.Regexp) Sync {
 		cloneFolder: cloneFolder,
 		archiveName: name,
 		pattern:     pattern,
+		extraFiles:  extraFiles,
 	}
 }
 
@@ -96,18 +98,24 @@ func isGitRepo(path string) bool {
 
 func main() {
 	if len(os.Args) < 2 {
-		log.Println("usage:", filepath.Base(os.Args[0]), " <Regex>")
+		log.Println("usage:", filepath.Base(os.Args[0]), " <pattern> <extraFiles...>")
 		os.Exit(-1)
 	}
+	additioanlFiles := []string{}
+	if len(os.Args) > 2 {
+		additioanlFiles = os.Args[2:]
+	}
+
 	pattern, err := regexp.Compile(os.Args[1])
 	if err != nil {
 		panic(err)
 	}
-	sync := NewSync(pattern)
 
+	sync := NewSync(pattern, additioanlFiles)
 	repos := make(chan string, 100)
 	go sync.FindRepo(repos)
 	sync.Clone(repos)
+	sync.LoadExtraFiles()
 	sync.CreateZipArchive()
 }
 
@@ -116,7 +124,6 @@ func (sync *Sync) CreateZipArchive() {
 	zipFile, err := os.OpenFile(zipFilePath, os.O_CREATE, fs.ModeCharDevice)
 	if err != nil {
 		log.Panicln("error opening zip file:", err)
-		panic("failed to create zip file")
 	}
 	defer zipFile.Close()
 	writer := zip.NewWriter(zipFile)
@@ -139,7 +146,7 @@ func (sync *Sync) Clone(repos <-chan string) {
 		dirName := filepath.Base(repo)
 
 		newRepoPath := filepath.Join(sync.cloneFolder, dirName)
-		log.Println(newRepoPath, repo, head.Name())
+
 		newRepo, err := git.PlainClone(newRepoPath, false, &git.CloneOptions{
 			URL:           repo,
 			SingleBranch:  true,
@@ -157,7 +164,7 @@ func (sync *Sync) Clone(repos <-chan string) {
 		}
 		for _, remote := range remotes {
 			if err := newRepo.DeleteRemote(remote.Config().Name); err != nil {
-				log.Println("Failed to delete remote", remote)
+				log.Fatal("Failed to delete remote", remote)
 			}
 		}
 
@@ -170,5 +177,24 @@ func (sync *Sync) Clone(repos <-chan string) {
 				log.Fatalln(err)
 			}
 		}
+	}
+}
+
+func (sync *Sync) LoadExtraFiles() {
+	if len(sync.extraFiles) == 0 {
+		return
+	}
+
+	for _, file := range sync.extraFiles {
+		src, err := os.ReadFile(file)
+		checkError(err)
+
+		srcInfo, err := os.Stat(file)
+		checkError(err)
+		fileMode := srcInfo.Mode()
+
+		dst := filepath.Join(sync.cloneFolder, filepath.Base(file))
+		err = os.WriteFile(dst, src, fileMode)
+		checkError(err)
 	}
 }
