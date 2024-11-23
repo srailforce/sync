@@ -37,6 +37,8 @@ func NewSync(pattern *regexp.Regexp, extraFiles []string) Sync {
 	err = os.Mkdir(cloneFolder, fs.ModeDir)
 	checkError(err)
 
+	fmt.Println(cloneFolder)
+
 	return Sync{
 		tempDir:     tempDir,
 		cloneFolder: cloneFolder,
@@ -44,6 +46,10 @@ func NewSync(pattern *regexp.Regexp, extraFiles []string) Sync {
 		pattern:     pattern,
 		extraFiles:  extraFiles,
 	}
+}
+
+func (state *Sync) Cleanup() {
+	os.RemoveAll(state.tempDir)
 }
 
 func (state *Sync) FindRepo(ch chan<- string) {
@@ -117,6 +123,7 @@ func main() {
 	sync.Clone(repos)
 	sync.LoadExtraFiles()
 	sync.CreateZipArchive()
+	defer sync.Cleanup()
 }
 
 func (sync *Sync) CreateZipArchive() {
@@ -132,50 +139,58 @@ func (sync *Sync) CreateZipArchive() {
 	fmt.Println(zipFilePath)
 }
 
-func (sync *Sync) Clone(repos <-chan string) {
+func (state *Sync) Clone(repos <-chan string) {
+	var wg sync.WaitGroup
 	for repo := range repos {
-		log.Println("clone", repo)
-		r, err := git.PlainOpen(repo)
-		if err != nil {
+		wg.Add(1)
+		go clone(repo, state.cloneFolder, &wg)
+	}
+	wg.Wait()
+}
+
+func clone(repo, cloneFolder string, wg *sync.WaitGroup) {
+	defer wg.Done()
+	log.Println("clone", repo)
+	r, err := git.PlainOpen(repo)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	head, err := r.Head()
+	if err != nil {
+		log.Fatalln("Error getting worktree:", repo, err)
+	}
+	dirName := filepath.Base(repo)
+
+	newRepoPath := filepath.Join(cloneFolder, dirName)
+
+	newRepo, err := git.PlainClone(newRepoPath, false, &git.CloneOptions{
+		URL:           repo,
+		SingleBranch:  true,
+		ReferenceName: head.Name(),
+		Progress:      nil,
+	})
+
+	if err != nil {
+		log.Fatalln("error cloning repo: ", repo)
+	}
+
+	remotes, err := newRepo.Remotes()
+	if err != nil {
+		log.Fatalln(err)
+	}
+	for _, remote := range remotes {
+		if err := newRepo.DeleteRemote(remote.Config().Name); err != nil {
+			log.Fatal("Failed to delete remote", remote)
+		}
+	}
+
+	remotes, err = r.Remotes()
+	if err != nil {
+		log.Fatalln(err)
+	}
+	for _, remote := range remotes {
+		if _, err := newRepo.CreateRemote(remote.Config()); err != nil {
 			log.Fatalln(err)
-		}
-		head, err := r.Head()
-		if err != nil {
-			log.Fatalln("Error getting worktree:", repo, err)
-		}
-		dirName := filepath.Base(repo)
-
-		newRepoPath := filepath.Join(sync.cloneFolder, dirName)
-
-		newRepo, err := git.PlainClone(newRepoPath, false, &git.CloneOptions{
-			URL:           repo,
-			SingleBranch:  true,
-			ReferenceName: head.Name(),
-			Progress:      os.Stderr,
-		})
-
-		if err != nil {
-			log.Fatalln("error cloning repo: ", repo)
-		}
-
-		remotes, err := newRepo.Remotes()
-		if err != nil {
-			log.Fatalln(err)
-		}
-		for _, remote := range remotes {
-			if err := newRepo.DeleteRemote(remote.Config().Name); err != nil {
-				log.Fatal("Failed to delete remote", remote)
-			}
-		}
-
-		remotes, err = r.Remotes()
-		if err != nil {
-			log.Fatalln(err)
-		}
-		for _, remote := range remotes {
-			if _, err := newRepo.CreateRemote(remote.Config()); err != nil {
-				log.Fatalln(err)
-			}
 		}
 	}
 }

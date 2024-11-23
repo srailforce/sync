@@ -1,4 +1,4 @@
-module toy/sync
+module github.com/utils/sync
 
 go 1.23.3
 
