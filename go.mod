@@ -1,6 +1,6 @@
 module github.com/utils/sync
 
-go 1.23.3
+go 1.23
 
 require github.com/go-git/go-git/v5 v5.12.0
 
